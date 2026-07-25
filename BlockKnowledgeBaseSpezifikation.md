@@ -22,11 +22,11 @@ Die Anwendung soll möglichst einfach selbst hostbar sein und zunächst überwie
 - Vanilla PHP
 - Vanilla JavaScript
 - HTML und CSS
-- JSON-Dateien als Datenspeicher
-- keine Datenbank in Version 1
+- JSON-Dateien als dauerhafter Datenspeicher
+- keine SQL-Datenbank; das dateibasierte JSON-Modell ist auch langfristig die maßgebliche Datenhaltung
 - externe Bibliotheken nur dann, wenn sie einen klaren, nicht sinnvoll selbst abbildbaren Nutzen bringen
 
-Die Architektur soll bewusst so gestaltet sein, dass später eine Migration auf eine Datenbank oder andere Speichermechanismen möglich bleibt.
+Das Dateisystem und die JSON-Dateien bleiben dauerhaft die Source of Truth. Zusätzliche Suchindizes, Caches oder Hilfsdateien dürfen später ergänzt werden, müssen aber aus den Workspace- und Seitendateien reproduzierbar sein und ersetzen diese nicht.
 
 ---
 
@@ -161,12 +161,14 @@ Seiten und Blöcke sollen von Beginn an über klar definierte Endpunkte erreichb
 Beispiele:
 
 ```http
-GET /api/v1/pages/102
-GET /api/v1/pages/102/blocks
-GET /api/v1/pages/102/blocks?type=task
-GET /api/v1/pages/102/blocks?type=task&completed=false
-GET /api/v1/pages/102/blocks?type=task&completed=false&sort=-priority&limit=1
+GET /api/v1/workspaces/301/pages/102
+GET /api/v1/workspaces/301/pages/102/blocks
+GET /api/v1/workspaces/301/pages/102/blocks?type=task
+GET /api/v1/workspaces/301/pages/102/blocks?type=task&completed=false
+GET /api/v1/workspaces/301/pages/102/blocks?type=task&completed=false&sort=-priority&limit=1
 ```
+
+In GUI-Pfaden, API-Pfaden und gespeicherten Seitenreferenzen werden immer sowohl `workspaceId` als auch `pageId` angegeben. Die global eindeutige Seiten-ID ersetzt diese explizite Workspace-Zuordnung im Pfad nicht.
 
 Für einfache Geräte können zusätzliche vereinfachte Endpunkte angeboten werden:
 
@@ -179,15 +181,88 @@ Ein Gerät kann fest einer Seite zugeordnet werden. Dadurch muss das Gerät die 
 
 ---
 
-# 3. Seitenmodell
+# 3. Workspace-, Index- und Seitenmodell
+
+Die Daten werden in voneinander getrennte Workspaces aufgeteilt. Jeder Workspace besitzt einen eigenen Ordner und eine eigene `workspace.json`.
+
+Die `workspace.json` enthält insbesondere:
+
+- Workspace-Metadaten,
+- den vollständigen Hierarchie-Index,
+- die Reihenfolge der Hauptseiten,
+- die Reihenfolge der Unterseiten,
+- Navigationsmetadaten für den Seitenbaum,
+- reservierte beziehungsweise nicht wiederverwendbare Seiten-IDs.
+
+Beispiel:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": 301,
+  "title": "Privat",
+  "createdAt": "2026-07-18T00:00:00+02:00",
+  "updatedAt": "2026-07-25T20:00:00+02:00",
+  "pageIndex": {
+    "rootPageIds": [102, 205],
+    "pages": {
+      "102": {
+        "title": "Wetterstation",
+        "slug": "wetterstation",
+        "children": [103, 104]
+      },
+      "103": {
+        "title": "Verdrahtung",
+        "slug": "verdrahtung",
+        "children": []
+      },
+      "104": {
+        "title": "Gehäuse",
+        "slug": "gehaeuse",
+        "children": []
+      },
+      "205": {
+        "title": "Inbox",
+        "slug": "inbox",
+        "children": []
+      }
+    },
+    "retiredPageIds": []
+  }
+}
+```
+
+JSON-Objektschlüssel sind technisch Strings. Die IDs selbst werden in Feldern, URLs und APIs trotzdem als numerische Werte behandelt.
+
+## 3.1 Hierarchie-Index
+
+Die Seitenhierarchie wird ausschließlich im `pageIndex` der jeweiligen `workspace.json` verwaltet. Eine Seitendatei enthält weder `parentPageId` noch eine eigene Kopie der Hierarchie.
+
+Dabei gilt:
+
+- `rootPageIds` enthält die Seiten auf der obersten Ebene in ihrer manuellen Reihenfolge.
+- `pages.<pageId>.children` enthält die direkten Unterseiten in ihrer manuellen Reihenfolge.
+- Die Elternseite ergibt sich aus der Position der Page-ID in `rootPageIds` oder in einem `children`-Array.
+- Eine Page-ID darf innerhalb eines Workspace-Index genau einmal vorkommen.
+- Der `page_tree`-Block liest diesen Index rekursiv und muss zum Aufbau des Baums nicht jede einzelne Seitendatei öffnen.
+
+`title` und `slug` werden im Index als Navigationsmetadaten gespiegelt, damit Seitenbäume, Auswahlfelder und Breadcrumbs ohne Öffnen aller Seitendateien aufgebaut werden können. Beim Umbenennen einer Seite werden Seitendatei und Workspace-Index gemeinsam unter Locks und mit atomaren Dateiersetzungen aktualisiert.
+
+Der Hierarchie-Index ist die maßgebliche Quelle für:
+
+- Workspace-Zugehörigkeit,
+- Eltern-Kind-Beziehungen,
+- Reihenfolge der Seiten,
+- Wurzelseiten.
+
+## 3.2 Seitendatei
 
 Eine Seite besitzt mindestens:
 
 ```json
 {
   "schemaVersion": 1,
-  "id": "page_102",
-  "parentPageId": "page_10",
+  "id": 102,
   "title": "Wetterstation",
   "slug": "wetterstation",
   "revision": 12,
@@ -201,7 +276,9 @@ Eine Seite besitzt mindestens:
 }
 ```
 
-## 3.1 Seitentitel
+Die Seitendatei enthält bewusst keine `workspaceId`. Der aktuelle Workspace ergibt sich aus dem Workspace-Ordner und dem aufgerufenen Pfad. Dadurch muss die Seitendatei beim Verschieben in einen anderen Workspace nicht umgeschrieben werden.
+
+## 3.3 Seitentitel
 
 Der Seitentitel ist kein normaler Heading-Block.
 
@@ -220,29 +297,95 @@ Er gehört zu den Seitenmetadaten, weil er für folgende Funktionen verwendet wi
 
 Im Editor darf der Seitentitel trotzdem optisch wie ein oberster Block wirken.
 
----
+## 3.4 Seiten verschieben
 
-## 3.2 Seitenhierarchie
+Beim Verschieben innerhalb desselben Workspace wird nur der Hierarchie-Index geändert. Die Seitendatei selbst bleibt unverändert.
 
-Die Hierarchie entsteht über:
+Beim Verschieben zwischen Workspaces werden:
+
+1. Quell- und Ziel-Workspace in stabiler Reihenfolge gesperrt,
+2. die betroffene Seite beziehungsweise der gesamte gewählte Unterbaum ermittelt,
+3. die zugehörigen Seitenordner in den Ziel-Workspace verschoben,
+4. beide Workspace-Indizes aktualisiert,
+5. die Operation über ein Transaktionsjournal gegen Teilfehler absicherbar gemacht.
+
+Da Seiten-IDs global eindeutig sind, bleibt die Page-ID beim Verschieben unverändert.
+
+Ein alter Pfad darf bei Bedarf aufgelöst werden, indem der Resolver bei einer nicht im angegebenen Workspace gefundenen Page-ID die übrigen Workspace-Indizes durchsucht und auf den aktuellen Workspace-Pfad umleitet. Dies ist ein Fallback für veraltete Links und ersetzt nicht die explizite Angabe beider IDs.
+
+## 3.5 Pfade und Referenzen
+
+GUI-Pfad:
+
+```text
+/workspaces/301/pages/102
+```
+
+API-Pfad:
+
+```text
+/api/v1/workspaces/301/pages/102
+```
+
+Gespeicherte Seitenreferenz:
 
 ```json
 {
-  "parentPageId": "page_10"
+  "workspaceId": 301,
+  "pageId": 102
 }
 ```
 
-Jede Seite darf Unterseiten besitzen.
+Auch bei global eindeutigen Page-IDs werden `workspaceId` und `pageId` immer gemeinsam gespeichert und übertragen. Geheime Freigabe-URLs sind die bewusste Ausnahme, weil sie interne Pfade verschleiern sollen.
 
-Die Reihenfolge der Unterseiten kann entweder:
+## 3.6 ID-Regeln
 
-- über eine Reihenfolgenliste im Elternobjekt,
-- über ein eigenes Sortierfeld,
-- oder über eine separate Indexdatei
+### Workspace-IDs
 
-gespeichert werden.
+- automatisch erzeugt,
+- ausschließlich numerisch,
+- größer als 100,
+- keine führenden Nullen,
+- eindeutig unter allen Workspaces,
+- als JSON-Zahl und nicht als formatierter String gespeichert.
 
-Für Version 1 ist eine einfache manuelle Sortierung ausreichend.
+### Page-IDs
+
+- automatisch erzeugt,
+- ausschließlich numerisch,
+- größer als 100,
+- keine führenden Nullen,
+- global eindeutig über alle Workspaces,
+- werden nach dem Löschen nicht wiederverwendet.
+
+Für neue Page-IDs wird unter einem globalen ID-Lock:
+
+1. jede vorhandene `workspace.json` eingelesen,
+2. jede aktive Page-ID gesammelt,
+3. jede `retiredPageId` gesammelt,
+4. mit `random_int(101, 999999999999)` ein Kandidat erzeugt,
+5. bei einer Kollision erneut gewürfelt,
+6. die neue ID erst anschließend in den Zielindex geschrieben.
+
+Der Wertebereich bleibt deutlich unter `Number.MAX_SAFE_INTEGER` und kann dadurch in PHP, JavaScript und JSON zuverlässig als Ganzzahl verarbeitet werden.
+
+### Block-IDs
+
+Block-IDs dürfen bis zu 64 hexadezimale Zeichen besitzen. Empfohlen ist eine 64-stellige, kleingeschriebene SHA-256-ID aus:
+
+- Source-Page-ID,
+- hochauflösendem Zeitstempel,
+- kryptografisch zufälligen Bytes.
+
+Beispielhaft:
+
+```php
+$blockId = hash('sha256', $pageId . '|' . hrtime(true) . '|' . random_bytes(32));
+```
+
+Dadurch ist keine globale Suche durch alle Seiten nötig. Vor dem Einfügen wird trotzdem geprüft, ob die ID innerhalb der aktuellen Seite bereits existiert.
+
+Die lesbaren IDs wie `block_task_1` in den Beispielen dieser Spezifikation dienen ausschließlich der Verständlichkeit. Die Implementierung verwendet die hier definierten hexadezimalen Block-IDs.
 
 ---
 
@@ -399,7 +542,7 @@ Der Block ist insbesondere für folgende Fälle gedacht:
 Optionaler Endpunkt:
 
 ```http
-GET /api/v1/pages/102/blocks/block_raw_1/content
+GET /api/v1/workspaces/301/pages/102/blocks/{blockId}/content
 Accept: text/plain
 ```
 
@@ -506,7 +649,8 @@ Beispiel:
   "type": "page_tree",
   "content": null,
   "settings": {
-    "rootPageId": "page_102",
+    "rootWorkspaceId": 301,
+    "rootPageId": 102,
     "includeRoot": false,
     "maxDepth": 3,
     "showEmptyPages": true,
@@ -586,7 +730,8 @@ Beispiel:
   "settings": {
     "entity": "block",
     "scope": {
-      "pageId": "page_102",
+      "workspaceId": 301,
+      "pageId": 102,
       "includeSubpages": true
     },
     "filter": {
@@ -992,7 +1137,8 @@ Beispiel:
   "id": "block_showpage_1",
   "type": "show_page",
   "content": {
-    "pageId": "page_123"
+    "workspaceId": 301,
+    "pageId": 123
   },
   "settings": {
     "defaultDisplay": "collapsed",
@@ -1197,7 +1343,7 @@ in einer separaten Browseransicht geöffnet werden.
 Beispielroute:
 
 ```text
-/editor/page/page_102/block/block_md_1
+/editor/workspaces/301/pages/102/blocks/{blockId}
 ```
 
 Die Ansicht zeigt ausschließlich:
@@ -1419,15 +1565,17 @@ Beispiel:
 
 ```text
 data/
-└── pages/
-    └── page_102/
-        ├── page.json
-        ├── autosave.json
-        ├── autosave.previous.json
-        └── versions/
-            ├── 000001.json
-            ├── 000002.json
-            └── 000003.json
+└── workspaces/
+    └── 301/
+        └── pages/
+            └── 102/
+                ├── page.json
+                ├── autosave.json
+                ├── autosave.previous.json
+                └── versions/
+                    ├── 000001.json
+                    ├── 000002.json
+                    └── 000003.json
 ```
 
 Bedeutung:
@@ -1673,7 +1821,7 @@ asset_versions
 Dateien liegen beispielsweise unter:
 
 ```text
-data/assets/asset_42/v1/original.bin
+data/workspaces/301/assets/asset_42/v1/original.bin
 ```
 
 Oder später in MinIO beziehungsweise S3.
@@ -1746,6 +1894,7 @@ Freigabe „Mutti“
 ```text
 shares
 - id
+- workspaceId
 - pageId
 - label
 - tokenHash
@@ -1802,7 +1951,7 @@ Elternseiten oberhalb des Freigabepunkts bleiben unsichtbar.
 Interne URL:
 
 ```text
-/pages/102
+/workspaces/301/pages/102
 ```
 
 Freigabe-URL:
@@ -1814,7 +1963,7 @@ Freigabe-URL:
 Alternativ:
 
 ```text
-/pages/102?share=Fv8yKp3xR7mQ2zN6...
+/workspaces/301/pages/102?share=Fv8yKp3xR7mQ2zN6...
 ```
 
 Der Query-Link kann auf die separate Freigabe-URL umleiten.
@@ -1859,6 +2008,7 @@ Bei einem gepinnten Unterbaum wird ein Manifest benötigt:
 ```text
 share_revision_manifest
 - shareId
+- workspaceId
 - pageId
 - revisionId
 ```
@@ -2056,20 +2206,20 @@ Wichtig ist, keine Daten still zu überschreiben.
 ## 16.1 Seiten
 
 ```http
-GET    /api/v1/pages/{pageId}
-POST   /api/v1/pages
-PATCH  /api/v1/pages/{pageId}
-DELETE /api/v1/pages/{pageId}
+GET    /api/v1/workspaces/{workspaceId}/pages/{pageId}
+POST   /api/v1/workspaces/{workspaceId}/pages
+PATCH  /api/v1/workspaces/{workspaceId}/pages/{pageId}
+DELETE /api/v1/workspaces/{workspaceId}/pages/{pageId}
 ```
 
 ## 16.2 Blöcke
 
 ```http
-GET    /api/v1/pages/{pageId}/blocks
-POST   /api/v1/pages/{pageId}/blocks
-GET    /api/v1/blocks/{blockId}
-PATCH  /api/v1/blocks/{blockId}
-DELETE /api/v1/blocks/{blockId}
+GET    /api/v1/workspaces/{workspaceId}/pages/{pageId}/blocks
+POST   /api/v1/workspaces/{workspaceId}/pages/{pageId}/blocks
+GET    /api/v1/workspaces/{workspaceId}/pages/{pageId}/blocks/{blockId}
+PATCH  /api/v1/workspaces/{workspaceId}/pages/{pageId}/blocks/{blockId}
+DELETE /api/v1/workspaces/{workspaceId}/pages/{pageId}/blocks/{blockId}
 ```
 
 ## 16.3 Filter
@@ -2077,11 +2227,11 @@ DELETE /api/v1/blocks/{blockId}
 Bevorzugte einfache Parameter:
 
 ```http
-GET /api/v1/pages/102/blocks?type=task
-GET /api/v1/pages/102/blocks?type=task&completed=false
-GET /api/v1/pages/102/blocks?type=task&tag=esp32
-GET /api/v1/pages/102/blocks?type=task&recursive=true
-GET /api/v1/pages/102/blocks?type=task&sort=-priority&limit=1
+GET /api/v1/workspaces/301/pages/102/blocks?type=task
+GET /api/v1/workspaces/301/pages/102/blocks?type=task&completed=false
+GET /api/v1/workspaces/301/pages/102/blocks?type=task&tag=esp32
+GET /api/v1/workspaces/301/pages/102/blocks?type=task&recursive=true
+GET /api/v1/workspaces/301/pages/102/blocks?type=task&sort=-priority&limit=1
 ```
 
 Später optional komplexere Query-Sprache oder POST-Abfrage.
@@ -2093,7 +2243,7 @@ Später optional komplexere Query-Sprache oder POST-Abfrage.
 Einzelner Raw-Text-Block:
 
 ```http
-GET /api/v1/pages/102/blocks/block_raw_1/content
+GET /api/v1/workspaces/301/pages/102/blocks/{blockId}/content
 Accept: text/plain
 ```
 
@@ -2110,6 +2260,7 @@ devices
 - id
 - name
 - tokenHash
+- workspaceId
 - pageId
 - canRead
 - canCreate
@@ -2147,7 +2298,7 @@ GET /api/device/latest-task
 POST /api/device/task
 ```
 
-Die Seite ergibt sich aus dem Gerätetoken.
+Workspace und Seite ergeben sich aus dem Gerätetoken.
 
 ---
 
@@ -2187,7 +2338,17 @@ Ein Gerät soll vor der endgültigen Erstellung bestätigen können.
 
 ---
 
-# 18. Dateibasierte Speicherung
+# 18. Dauerhafte dateibasierte JSON-Speicherung
+
+Das dateibasierte JSON-Modell ist nicht nur ein Provisorium für Version 1, sondern die dauerhaft vorgesehene Datenarchitektur.
+
+Dabei gilt:
+
+- Workspace- und Seitendateien bleiben die Source of Truth.
+- Es ist keine spätere Migration auf SQL erforderlich oder vorgesehen.
+- Suchindizes, Caches und Vorschaudateien dürfen ergänzt werden, sind aber abgeleitete Daten.
+- Jede abgeleitete Datei muss löschbar und aus den maßgeblichen JSON-Dateien erneut erzeugbar sein.
+- Die Daten bleiben ohne Spezialdatenbank direkt im Dateisystem lesbar, sicherbar und versionierbar.
 
 ## 18.1 Grundstruktur
 
@@ -2195,41 +2356,81 @@ Beispiel:
 
 ```text
 data/
-├── pages/
-│   ├── page_102/
-│   │   ├── page.json
-│   │   ├── autosave.json
-│   │   ├── autosave.previous.json
-│   │   └── versions/
-│   │       ├── 000001.json
-│   │       └── 000002.json
-│   └── page_103/
-├── assets/
-├── shares/
-├── devices/
+├── workspaces/
+│   ├── 301/
+│   │   ├── workspace.json
+│   │   ├── workspace.previous.json
+│   │   ├── pages/
+│   │   │   ├── 102/
+│   │   │   │   ├── page.json
+│   │   │   │   ├── autosave.json
+│   │   │   │   ├── autosave.previous.json
+│   │   │   │   └── versions/
+│   │   │   │       ├── 000001.json
+│   │   │   │       └── 000002.json
+│   │   │   └── 103/
+│   │   ├── assets/
+│   │   ├── shares/
+│   │   ├── devices/
+│   │   └── logs/
+│   └── 402/
+│       ├── workspace.json
+│       ├── pages/
+│       ├── assets/
+│       ├── shares/
+│       ├── devices/
+│       └── logs/
 ├── users/
+├── auth/
+├── transactions/
+├── locks/
+│   ├── page-id.lock
+│   ├── workspace-id.lock
+│   └── workspace-move.lock
 └── logs/
 ```
 
----
+Damit liegen nicht tausende Seiten, Versionen und Assets in einem einzigen Verzeichnis. Jeder Workspace bildet eine eigene Dateisystemgrenze, und jede Seite besitzt wiederum einen eigenen Unterordner.
 
-## 18.2 Atomare Schreibvorgänge
+## 18.2 Workspace-Index
+
+Jeder Workspace besitzt genau eine maßgebliche `workspace.json` mit seinem eigenen Seitenindex.
+
+Für einen vollständigen Seitenbaum wird nur diese Datei gelesen. Die einzelnen `page.json`-Dateien werden erst geöffnet, wenn konkrete Seiteninhalte benötigt werden.
+
+`workspace.previous.json` kann als letzte technisch gültige Sicherung des Index dienen. Zusätzlich kann der Workspace-Index selbst versioniert oder regelmäßig gesichert werden, weil die Hierarchie nicht aus den Seitendateien allein rekonstruiert werden kann.
+
+## 18.3 ID-Erzeugung
+
+Die Erzeugung einer neuen global eindeutigen Page-ID erfolgt unter `locks/page-id.lock`.
+
+Während dieser Sperre werden alle `workspace.json`-Dateien eingelesen und aktive sowie stillgelegte Page-IDs gesammelt. Erst danach wird eine zufällige numerische ID gewählt und in den Zielindex geschrieben.
+
+Der globale Lock verhindert, dass zwei parallele Requests nach demselben vollständigen Scan zufällig dieselbe noch freie ID übernehmen.
+
+Für neue Workspace-IDs gilt dasselbe Prinzip mit `locks/workspace-id.lock` und einem Scan der vorhandenen Workspace-Ordner beziehungsweise Workspace-IDs.
+
+## 18.4 Atomare Schreibvorgänge
 
 Jede JSON-Datei wird atomar geschrieben:
 
-1. neue Datei als temporäre Datei schreiben,
-2. JSON erneut einlesen und validieren,
-3. optional `fsync`,
-4. per `rename()` ersetzen.
+1. zuständige Lock-Datei öffnen,
+2. neue Datei vollständig als temporäre Datei schreiben,
+3. JSON erneut einlesen und validieren,
+4. optional `fsync` ausführen,
+5. bisherige gültige Datei als `.previous` sichern,
+6. temporäre Datei per `rename()` ersetzen,
+7. Lock freigeben.
 
 Beispiel:
 
 ```text
-autosave.json.tmp
+workspace.json.tmp
 ↓
 Validierung
 ↓
-autosave.json
+workspace.previous.json
+workspace.json
 ```
 
 Zusätzlich:
@@ -2241,11 +2442,13 @@ Zusätzlich:
 - stabile IDs,
 - Backups.
 
----
+Beim gleichzeitigen Sperren mehrerer Workspaces werden Locks immer in aufsteigender numerischer Workspace-ID erworben. Dadurch werden Deadlocks vermieden.
 
-## 18.3 Spätere Auslagerung großer Blockinhalte
+Workspace-übergreifende Verschiebungen erhalten zusätzlich eine Datei unter `transactions/`. Sie beschreibt Ausgangszustand, Zielzustand und Fortschritt, damit ein abgebrochener Vorgang sicher fortgesetzt oder zurückgerollt werden kann.
 
-In Version 1 liegen alle Blockinhalte direkt im Seiten-JSON.
+## 18.5 Spätere Auslagerung großer Blockinhalte
+
+Zunächst liegen alle Blockinhalte direkt im Seiten-JSON.
 
 Später können große Inhalte ausgelagert werden.
 
@@ -2262,11 +2465,11 @@ Besser:
 ```json
 {
   "content": null,
-  "contentRef": "blocks/block_17.md"
+  "contentRef": "blocks/4f6c7d8e.md"
 }
 ```
 
-Dadurch bleibt das Schema eindeutig.
+Dadurch bleibt das Schema eindeutig. Die ausgelagerten Dateien bleiben Teil der dateibasierten Workspace-Struktur und werden gemeinsam mit der Seite verschoben, versioniert und gesichert.
 
 ---
 
@@ -2406,25 +2609,31 @@ Noch nicht umsetzen:
 # 22. Zentrale Architekturentscheidungen
 
 1. Alles ist eine Seite.
-2. Seiten bestehen aus Blöcken.
-3. Aufgaben sind strukturierte Blöcke.
-4. Block-IDs sind stabil.
-5. Raw Text wird niemals interpretiert.
-6. Markdown bleibt die kanonische Quelle.
-7. Trusted HTML läuft vollständig im Hauptfenster.
-8. Sandbox HTML läuft isoliert und erst nach Bestätigung.
-9. Seitenrevisionen speichern Snapshots und Asset-Referenzen.
-10. Dateien besitzen eigene unveränderliche Versionen.
-11. Autosaves werden überschrieben.
-12. Dauerhafte Versionen sind unveränderlich.
-13. Freigaben sind eigene Objekte.
-14. Gepinnte Freigaben sind read-only.
-15. Keine Ordnerobjekte.
-16. Version 1 bleibt Vanilla PHP, Vanilla JS und JSON-basiert.
-17. Der Editor ist ein Blockeditor und kein klassischer Texteditor.
-18. Große Blöcke können minimiert und separat bearbeitet werden.
-19. Die API wird von Beginn an mitgedacht.
-20. Komplexe Zusammenarbeit wird schrittweise ergänzt.
+2. Es gibt keine Ordnerobjekte innerhalb der Seitenhierarchie.
+3. Die Daten sind dauerhaft in dateibasierten JSON-Dateien organisiert; eine SQL-Migration ist nicht vorgesehen.
+4. Jeder Workspace besitzt einen eigenen Dateisystemordner und eine eigene `workspace.json`.
+5. Die vollständige Seitenhierarchie und Seitenreihenfolge liegen im Workspace-Index, nicht in den Seitendateien.
+6. Seitendateien enthalten weder `parentPageId` noch `workspaceId`.
+7. Page-IDs sind zufällige numerische Ganzzahlen, größer als 100 und global über alle Workspaces eindeutig.
+8. Workspace-IDs sind zufällige numerische Ganzzahlen, größer als 100 und eindeutig.
+9. GUI-, API- und Referenzpfade enthalten immer `workspaceId` und `pageId`.
+10. Seiten bestehen aus Blöcken.
+11. Aufgaben sind strukturierte Blöcke.
+12. Block-IDs sind stabile, bis zu 64 Zeichen lange hexadezimale IDs.
+13. Raw Text wird niemals interpretiert.
+14. Markdown bleibt die kanonische Quelle.
+15. Trusted HTML läuft vollständig im Hauptfenster.
+16. Sandbox HTML läuft isoliert und erst nach Bestätigung.
+17. Seitenrevisionen speichern Snapshots und Asset-Referenzen.
+18. Dateien besitzen eigene unveränderliche Versionen.
+19. Autosaves werden überschrieben.
+20. Dauerhafte Versionen sind unveränderlich.
+21. Freigaben sind eigene Objekte.
+22. Gepinnte Freigaben sind read-only.
+23. Der Editor ist ein Blockeditor und kein klassischer Texteditor.
+24. Große Blöcke können minimiert und separat bearbeitet werden.
+25. Die API wird von Beginn an mitgedacht.
+26. Komplexe Zusammenarbeit wird schrittweise ergänzt.
 
 ---
 
@@ -2433,8 +2642,7 @@ Noch nicht umsetzen:
 ```json
 {
   "schemaVersion": 1,
-  "id": "page_102",
-  "parentPageId": "page_10",
+  "id": 102,
   "title": "Wetterstation",
   "slug": "wetterstation",
   "revision": 12,
@@ -2525,16 +2733,27 @@ Für den nächsten Chat-Kontext empfiehlt sich folgender erster Auftrag:
 
 ```text
 Wir bauen eine blockbasierte Knowledge-, Task- und Projekt-Web-App mit Vanilla PHP,
-Vanilla JavaScript und JSON-Dateien.
+Vanilla JavaScript und dauerhaft dateibasierten JSON-Dateien. Eine spätere SQL-Migration
+ist nicht vorgesehen.
 
-Alle Hierarchieelemente sind Seiten. Es gibt keine Ordnerobjekte.
+Alle Hierarchieelemente sind Seiten. Es gibt keine Ordnerobjekte. Die Anwendung ist in
+Workspaces aufgeteilt. Jeder Workspace besitzt einen eigenen Ordner und eine eigene
+workspace.json mit dem vollständigen Hierarchie-Index. Seitendateien enthalten weder
+parentPageId noch workspaceId.
+
+Workspace- und Page-IDs sind automatisch erzeugte numerische Ganzzahlen größer als 100.
+Page-IDs müssen nach Einlesen aller Workspace-Indizes global eindeutig vergeben werden.
+Block-IDs sind 64-stellige hexadezimale IDs. GUI-, API- und Referenzpfade enthalten immer
+workspaceId und pageId.
 
 Bitte beginne mit einem minimalen, aber sauber strukturierten Grundgerüst für:
 
 - Benutzeranmeldung
-- Seitenhierarchie
-- Seiten erstellen, umbenennen und verschieben
-- JSON-Dateispeicherung
+- Workspaces und Workspace-Auswahl
+- workspace.json mit vollständigem Hierarchie-Index
+- Seiten erstellen, umbenennen und innerhalb beziehungsweise zwischen Workspaces verschieben
+- dauerhafte JSON-Dateispeicherung
+- globale ID-Locks und kollisionssichere ID-Erzeugung
 - atomare Schreibvorgänge mit flock und temporären Dateien
 - blockbasierten Editor
 - zunächst die Blocktypen heading, raw_text und markdown
