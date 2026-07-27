@@ -64,6 +64,12 @@ $assert(
     preg_match('/^[a-f0-9]{64}$/', $blockId) === 1,
     'Block-IDs müssen 64-stellige kleingeschriebene Hexadezimalwerte sein.'
 );
+$codeBlockId = $pages->newBlockId((int) $workspaceA['id'], (int) $rootPage['id']);
+$dividerBlockId = $pages->newBlockId((int) $workspaceA['id'], (int) $rootPage['id']);
+$calloutBlockId = $pages->newBlockId((int) $workspaceA['id'], (int) $rootPage['id']);
+$calloutChildId = $pages->newBlockId((int) $workspaceA['id'], (int) $rootPage['id']);
+$expandBlockId = $pages->newBlockId((int) $workspaceA['id'], (int) $rootPage['id']);
+$expandChildId = $pages->newBlockId((int) $workspaceA['id'], (int) $rootPage['id']);
 
 $editorState = $pages->editorState((int) $workspaceA['id'], (int) $rootPage['id']);
 $draftPage = $editorState['page'];
@@ -75,6 +81,64 @@ $draftPage['blocks'][] = [
         'level' => 2,
         'includeInToc' => true,
         'anchor' => null,
+    ],
+    'meta' => [],
+];
+$draftPage['blocks'][] = [
+    'id' => $codeBlockId,
+    'type' => 'code',
+    'content' => "echo \"Hallo\";\n",
+    'settings' => [
+        'language' => 'php',
+        'showLineNumbers' => true,
+        'wrap' => false,
+        'title' => 'beispiel.php',
+    ],
+    'meta' => [],
+];
+$draftPage['blocks'][] = [
+    'id' => $dividerBlockId,
+    'type' => 'divider',
+    'content' => null,
+    'settings' => ['style' => 'line'],
+    'meta' => [],
+];
+$draftPage['blocks'][] = [
+    'id' => $calloutBlockId,
+    'type' => 'callout',
+    'content' => null,
+    'settings' => [
+        'style' => 'warning',
+        'title' => 'Achtung',
+        'icon' => '⚠',
+    ],
+    'children' => [
+        [
+            'id' => $calloutChildId,
+            'type' => 'raw_text',
+            'content' => 'Spannung abschalten',
+            'settings' => ['wrap' => true],
+            'meta' => [],
+        ],
+    ],
+    'meta' => [],
+];
+$draftPage['blocks'][] = [
+    'id' => $expandBlockId,
+    'type' => 'expand',
+    'content' => null,
+    'settings' => [
+        'title' => 'Technische Details',
+        'defaultDisplay' => 'collapsed',
+    ],
+    'children' => [
+        [
+            'id' => $expandChildId,
+            'type' => 'markdown',
+            'content' => '**I²C** verwenden',
+            'settings' => ['editorMode' => 'split'],
+            'meta' => [],
+        ],
     ],
     'meta' => [],
 ];
@@ -91,6 +155,39 @@ $assert($savedDraft['draftRevision'] === 1, 'Die erste Entwurfsrevision muss 1 s
 $assert(
     is_file($layout->pageAutosaveJson((int) $workspaceA['id'], (int) $rootPage['id'])),
     'autosave.json muss geschrieben werden.'
+);
+$assert(count($savedDraft['page']['blocks']) === 5, 'Alle sieben Basisblocktypen inklusive Kindblöcken müssen gespeichert werden.');
+$assert(
+    $savedDraft['page']['blocks'][1]['settings']['language'] === 'php',
+    'Code-Einstellungen müssen normalisiert gespeichert werden.'
+);
+$assert(
+    $savedDraft['page']['blocks'][3]['children'][0]['type'] === 'raw_text',
+    'Callouts müssen rekursive Kindblöcke erhalten.'
+);
+$assert(
+    $savedDraft['page']['blocks'][4]['children'][0]['type'] === 'markdown',
+    'Expand-Blöcke müssen rekursive Kindblöcke erhalten.'
+);
+
+$duplicateNestedIdDetected = false;
+$invalidDraft = $savedDraft['page'];
+$invalidDraft['blocks'][4]['children'][0]['id'] = $calloutChildId;
+try {
+    $pages->saveDraft(
+        (int) $workspaceA['id'],
+        (int) $rootPage['id'],
+        1,
+        $invalidDraft,
+        $userId
+    );
+} catch (\BKB\HttpException $exception) {
+    $duplicateNestedIdDetected = $exception->status === 422
+        && $exception->errorCode === 'DUPLICATE_BLOCK_ID';
+}
+$assert(
+    $duplicateNestedIdDetected,
+    'Doppelte Block-IDs müssen auch über Containergrenzen hinweg abgewiesen werden.'
 );
 
 $conflictDetected = false;

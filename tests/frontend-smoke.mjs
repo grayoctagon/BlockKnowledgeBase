@@ -65,6 +65,52 @@ let page = {
             settings: { editorMode: 'split' },
             meta: {},
         },
+        {
+            id: 'd'.repeat(64),
+            type: 'code',
+            content: 'digitalWrite(4, HIGH);',
+            settings: { language: 'cpp', showLineNumbers: true, wrap: false, title: 'main.cpp' },
+            meta: {},
+        },
+        {
+            id: 'e'.repeat(64),
+            type: 'divider',
+            content: null,
+            settings: { style: 'line' },
+            meta: {},
+        },
+        {
+            id: 'f'.repeat(64),
+            type: 'callout',
+            content: null,
+            settings: { style: 'warning', title: 'Achtung', icon: '⚠' },
+            children: [
+                {
+                    id: '1'.repeat(64),
+                    type: 'raw_text',
+                    content: 'Vorher ausschalten',
+                    settings: { wrap: true },
+                    meta: {},
+                },
+            ],
+            meta: {},
+        },
+        {
+            id: '2'.repeat(64),
+            type: 'expand',
+            content: null,
+            settings: { title: 'Details', defaultDisplay: 'collapsed' },
+            children: [
+                {
+                    id: '3'.repeat(64),
+                    type: 'code',
+                    content: 'const pin = 4;',
+                    settings: { language: 'js', showLineNumbers: false, wrap: true, title: null },
+                    meta: {},
+                },
+            ],
+            meta: {},
+        },
     ],
 };
 
@@ -180,11 +226,27 @@ function assert(condition, message) {
 
 await waitFor('.editor-page');
 assert(window.document.querySelector('#page-title').value === 'Wetterstation', 'Der Seitentitel muss erscheinen.');
-assert(window.document.querySelectorAll('.block-card').length === 3, 'Alle drei Basisblöcke müssen gerendert werden.');
-assert(window.document.querySelectorAll('.block-move').length === 3, 'Jeder Block benötigt ein Move-Handle.');
-assert(window.document.querySelectorAll('[data-action="up"]').length === 3, 'Jeder Block benötigt einen Aufwärtspfeil.');
-assert(window.document.querySelectorAll('[data-action="down"]').length === 3, 'Jeder Block benötigt einen Abwärtspfeil.');
-assert(window.document.querySelectorAll('[data-action="menu"]').length === 3, 'Jeder Block benötigt ein Drei-Punkte-Menü.');
+assert(window.document.querySelectorAll('.block-card').length === 9, 'Alle sieben Basisblocktypen und ihre Kindblöcke müssen gerendert werden.');
+assert(window.document.querySelectorAll('.block-move').length === 9, 'Jeder Block benötigt ein Move-Handle.');
+assert(window.document.querySelectorAll('[data-action="up"]').length === 9, 'Jeder Block benötigt einen Aufwärtspfeil.');
+assert(window.document.querySelectorAll('[data-action="down"]').length === 9, 'Jeder Block benötigt einen Abwärtspfeil.');
+assert(window.document.querySelectorAll('[data-action="menu"]').length === 9, 'Jeder Block benötigt ein Drei-Punkte-Menü.');
+assert(window.document.querySelector('.code-editor'), 'Der Codeblock muss einen eigenen Editor besitzen.');
+assert(
+    window.document.querySelector('[data-block-path="3"] .code-line-numbers span')?.textContent === '1',
+    'Aktivierte Code-Zeilennummern müssen sichtbar sein.'
+);
+assert(window.document.querySelector('.divider-editor hr'), 'Der Divider muss als Trennlinie erscheinen.');
+assert(window.document.querySelector('.callout-warning'), 'Der Callout-Stil muss sichtbar umgesetzt werden.');
+assert(
+    window.document.querySelector('[data-block-path="5"] [data-callout-title]')?.textContent === 'Achtung',
+    'Callouts müssen Titel und Icon als Vorschau darstellen.'
+);
+assert(window.document.querySelector('.expand-editor'), 'Der Expand-Container muss erscheinen.');
+assert(
+    window.document.querySelector('[data-block-path="5.0"] textarea')?.value === 'Vorher ausschalten',
+    'Kindblöcke in einem Callout müssen bearbeitbar sein.'
+);
 assert(
     window.document.querySelector('[data-block-id="' + 'c'.repeat(64) + '"] .markdown-preview strong')?.textContent === 'I²C',
     'Die Markdown-Vorschau muss Fettschrift sicher rendern.'
@@ -209,10 +271,25 @@ await waitFor('[data-choice="heading"]');
 window.document.querySelector('[data-choice="heading"]').click();
 await waitFor('[data-block-id="' + 'd'.repeat(63) + '"]', 50).catch(() => null);
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
-assert(window.document.querySelectorAll('.block-card').length === 4, 'Ein neuer Block muss über das Plus eingefügt werden.');
+assert(window.document.querySelectorAll('.block-card').length === 10, 'Ein neuer Block muss über das Plus eingefügt werden.');
 assert(
     calls.some((call) => call.path.endsWith('/block-ids') && call.method === 'POST'),
     'Neue Blöcke müssen ihre ID vom Server beziehen.'
+);
+
+window.document.querySelector('[data-parent-path="6"][data-insert-index="1"]').click();
+await waitFor('[data-choice="code"]');
+window.document.querySelector('[data-choice="code"]').click();
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 30));
+assert(
+    window.document.querySelectorAll('[data-block-path^="6."]').length >= 2,
+    'Neue Blöcke müssen direkt in einen Container eingefügt werden können.'
+);
+window.document.querySelector('[data-block-path="6.1"] [data-action="up"]').click();
+assert(
+    window.document.querySelector('[data-block-path="6.0"]')?.dataset.blockId
+        === (14).toString(16).padStart(64, '0'),
+    'Kindblöcke müssen innerhalb ihres Containers mit den Pfeilen sortierbar sein.'
 );
 assert(errors.length === 0, 'Die Oberfläche darf keine unbehandelten Laufzeitfehler auslösen.');
 

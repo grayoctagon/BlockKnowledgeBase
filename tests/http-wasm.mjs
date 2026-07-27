@@ -108,11 +108,45 @@ assert(response.status === 201, 'Eine Block-ID muss über die API erzeugt werden
 const blockId = response.payload.data.blockId;
 assert(/^[a-f0-9]{64}$/.test(blockId), 'Die API muss eine gültige Block-ID liefern.');
 
+response = await request(
+    'POST',
+    `/api/v1/workspaces/${workspaceId}/pages/${pageId}/block-ids`,
+    {}
+);
+const calloutId = response.payload.data.blockId;
+response = await request(
+    'POST',
+    `/api/v1/workspaces/${workspaceId}/pages/${pageId}/block-ids`,
+    {}
+);
+const nestedCodeId = response.payload.data.blockId;
+
 page.blocks.push({
     id: blockId,
     type: 'markdown',
     content: '**API-Smoke-Test**',
     settings: { editorMode: 'split' },
+    meta: {},
+});
+page.blocks.push({
+    id: calloutId,
+    type: 'callout',
+    content: null,
+    settings: { style: 'info', title: 'API-Hinweis', icon: null },
+    children: [
+        {
+            id: nestedCodeId,
+            type: 'code',
+            content: 'digitalWrite(4, HIGH);',
+            settings: {
+                language: 'cpp',
+                showLineNumbers: true,
+                wrap: false,
+                title: null,
+            },
+            meta: {},
+        },
+    ],
     meta: {},
 });
 
@@ -141,5 +175,12 @@ assert(response.payload.data.publishedRevision === 2, 'Die gespeicherte Version 
 response = await request('GET', `/api/v1/workspaces/${workspaceId}/pages/${pageId}/blocks?type=markdown`);
 assert(response.status === 200, 'Die Block-API muss erreichbar sein.');
 assert(response.payload.data.blocks.length === 1, 'Der Markdown-Filter muss den gespeicherten Block liefern.');
+
+response = await request(
+    'GET',
+    `/api/v1/workspaces/${workspaceId}/pages/${pageId}/blocks/${nestedCodeId}`
+);
+assert(response.status === 200, 'Verschachtelte Blöcke müssen einzeln abrufbar sein.');
+assert(response.payload.data.block.type === 'code', 'Die Block-API muss den verschachtelten Codeblock liefern.');
 
 console.log(`OK – ${assertions} HTTP-Assertions erfolgreich.`);

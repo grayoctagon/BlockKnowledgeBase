@@ -640,11 +640,7 @@ final class PageRepository
         $this->requirePageInWorkspace($workspaceId, $pageId);
         $state = $this->editorState($workspaceId, $pageId);
         $known = [];
-        foreach (($state['page']['blocks'] ?? []) as $block) {
-            if (is_array($block) && isset($block['id'])) {
-                $known[(string) $block['id']] = true;
-            }
-        }
+        $this->collectBlockIds($state['page']['blocks'] ?? [], $known);
 
         for ($attempt = 0; $attempt < 10; $attempt++) {
             $id = $this->ids->blockId($pageId);
@@ -654,6 +650,27 @@ final class PageRepository
         }
 
         throw new HttpException(503, 'BLOCK_ID_ALLOCATION_FAILED', 'Es konnte keine freie Block-ID erzeugt werden.');
+    }
+
+    /**
+     * @param mixed $blocks
+     * @param array<string, bool> $known
+     */
+    private function collectBlockIds(mixed $blocks, array &$known): void
+    {
+        if (!is_array($blocks)) {
+            return;
+        }
+
+        foreach ($blocks as $block) {
+            if (!is_array($block)) {
+                continue;
+            }
+            if (is_string($block['id'] ?? null)) {
+                $known[$block['id']] = true;
+            }
+            $this->collectBlockIds($block['children'] ?? null, $known);
+        }
     }
 
     /**

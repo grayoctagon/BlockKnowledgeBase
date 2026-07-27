@@ -61,7 +61,8 @@ data/
 2. Erstinstallation, Benutzeranmeldung und geschützte JSON-API.
 3. Workspaces, Seitenhierarchie, Umbenennen sowie Verschieben innerhalb und
    zwischen Workspaces.
-4. Blockeditor für `heading`, `raw_text` und `markdown`.
+4. Blockeditor für `heading`, `raw_text`, `markdown`, `code`, `divider`,
+   `callout` und `expand`, einschließlich rekursiver Kindblöcke in Containern.
 5. Auf-/Ab-Pfeile, Move-Handle, Drag-and-drop, Minimieren, Drei-Punkte-Menü
    und separater Blockeditor.
 6. Entwurfs-Autosave, Konflikterkennung und dauerhafte Revisionen.

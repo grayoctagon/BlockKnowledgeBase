@@ -18,7 +18,7 @@
         maxSaveTimer: null,
         dirtySince: null,
         metadataPromise: null,
-        draggedIndex: null,
+        draggedPath: null,
         cutBlock: null,
         collapsedBlocks: new Set(),
         collapsedTreePages: new Set(),
@@ -87,6 +87,56 @@
         return typeof structuredClone === 'function'
             ? structuredClone(value)
             : JSON.parse(JSON.stringify(value));
+    }
+
+    function pathKey(path) {
+        return path.join('.');
+    }
+
+    function parseBlockPath(value) {
+        if (value === '') return [];
+        return String(value)
+            .split('.')
+            .map((part) => Number(part))
+            .filter((part) => Number.isInteger(part) && part >= 0);
+    }
+
+    function blocksAtParentPath(parentPath) {
+        let blocks = state.pageState?.page?.blocks;
+        if (!Array.isArray(blocks)) return null;
+
+        for (const index of parentPath) {
+            const container = blocks[index];
+            if (!container || !['callout', 'expand'].includes(container.type)) return null;
+            if (!Array.isArray(container.children)) container.children = [];
+            blocks = container.children;
+        }
+
+        return blocks;
+    }
+
+    function blockAtPath(path) {
+        if (!path.length) return null;
+        const siblings = blocksAtParentPath(path.slice(0, -1));
+        return siblings?.[path.at(-1)] || null;
+    }
+
+    function findBlockPath(blocks, blockId, parentPath = []) {
+        for (let index = 0; index < blocks.length; index += 1) {
+            const block = blocks[index];
+            const path = [...parentPath, index];
+            if (block.id === blockId) return path;
+            if (Array.isArray(block.children)) {
+                const nested = findBlockPath(block.children, blockId, path);
+                if (nested) return nested;
+            }
+        }
+        return null;
+    }
+
+    function pathStartsWith(path, prefix) {
+        return prefix.length <= path.length
+            && prefix.every((part, index) => path[index] === part);
     }
 
     function formatDate(value, includeTime = true) {
@@ -623,16 +673,16 @@
         const main = document.querySelector('#main-content');
         const page = state.pageState.page;
         const standalone = state.route.type === 'block';
-        const focusedIndex = standalone
-            ? page.blocks.findIndex((block) => block.id === state.route.blockId)
-            : -1;
+        const focusedPath = standalone
+            ? findBlockPath(page.blocks, state.route.blockId)
+            : null;
 
         document.querySelector('.app-shell')?.classList.toggle('focus-mode', standalone);
         document.title = standalone
             ? `${page.title} · Block · BKB`
             : `${page.title} · BlockKnowledgeBase`;
 
-        if (standalone && focusedIndex < 0) {
+        if (standalone && !focusedPath) {
             main.innerHTML = `
                 <section class="empty-state">
                     <div class="empty-symbol">?</div>
@@ -647,7 +697,7 @@
         const breadcrumbs = breadcrumbPath(page.id)
             .map((part) => `<span>${escapeHtml(part.title)}</span>`)
             .join('<b aria-hidden="true">/</b>');
-        const blocks = standalone ? [page.blocks[focusedIndex]] : page.blocks;
+        const focusedBlock = focusedPath ? blockAtPath(focusedPath) : null;
 
         main.innerHTML = `
             <div class="editor-page ${standalone ? 'editor-page-focused' : ''}">
@@ -699,16 +749,13 @@
                     </div>
                 `}
                 <section class="block-stack" id="block-stack">
-                    ${standalone ? '' : insertButtonHtml(0)}
-                    ${blocks.map((block, localIndex) => {
-                        const index = standalone ? focusedIndex : localIndex;
-                        return blockHtml(block, index, standalone)
-                            + (standalone ? '' : insertButtonHtml(index + 1));
-                    }).join('')}
-                    ${blocks.length === 0 && !standalone ? `
+                    ${standalone
+                        ? blockHtml(focusedBlock, focusedPath, true)
+                        : blockListHtml(page.blocks, [])}
+                    ${page.blocks.length === 0 && !standalone ? `
                         <div class="blank-page-hint">
                             <p>Diese Seite hat noch keine Blöcke.</p>
-                            <span>Nutze das Plus, um mit einer Überschrift, Raw Text oder Markdown zu beginnen.</span>
+                            <span>Nutze das Plus, um den ersten Block einzufügen.</span>
                         </div>
                     ` : ''}
                 </section>
@@ -719,21 +766,41 @@
         updateMarkdownPreviews();
     }
 
-    function blockHtml(block, index, standalone) {
+    function blockListHtml(blocks, parentPath) {
+        return insertButtonHtml(parentPath, 0)
+            + blocks.map((block, index) => {
+                const path = [...parentPath, index];
+                return blockHtml(block, path, false)
+                    + insertButtonHtml(parentPath, index + 1);
+            }).join('');
+    }
+
+    function blockHtml(block, path, standalone) {
+        const key = pathKey(path);
         const collapsed = !standalone && state.collapsedBlocks.has(block.id);
         const summary = blockSummary(block);
+        const siblings = blocksAtParentPath(path.slice(0, -1)) || [];
+        const index = path.at(-1);
         const typeName = {
             heading: 'Überschrift',
             raw_text: 'Raw Text',
             markdown: 'Markdown',
+            code: 'Code',
+            divider: 'Trennlinie',
+            callout: 'Hinweisbox',
+            expand: 'Aufklappbarer Bereich',
         }[block.type] || block.type;
 
         return `
-            <article class="block-card ${collapsed ? 'block-collapsed' : ''}" data-block-id="${block.id}" data-index="${index}">
+            <article
+                class="block-card block-type-${escapeHtml(block.type)} ${collapsed ? 'block-collapsed' : ''}"
+                data-block-id="${block.id}"
+                data-block-path="${key}"
+            >
                 <header class="block-header">
                     <button class="block-move" type="button" draggable="true" aria-label="Block verschieben" title="Block verschieben">⠿</button>
                     <button class="block-arrow" type="button" data-action="up" aria-label="Block nach oben" title="Nach oben" ${index === 0 ? 'disabled' : ''}>↑</button>
-                    <button class="block-arrow" type="button" data-action="down" aria-label="Block nach unten" title="Nach unten" ${index === state.pageState.page.blocks.length - 1 ? 'disabled' : ''}>↓</button>
+                    <button class="block-arrow" type="button" data-action="down" aria-label="Block nach unten" title="Nach unten" ${index === siblings.length - 1 ? 'disabled' : ''}>↓</button>
                     <div class="block-heading">
                         <strong>${escapeHtml(typeName)}</strong>
                         <span>${escapeHtml(summary)}</span>
@@ -752,19 +819,20 @@
                     </div>
                 </header>
                 <div class="block-body">
-                    ${blockEditorHtml(block)}
+                    ${blockEditorHtml(block, path, standalone)}
                 </div>
             </article>
         `;
     }
 
-    function blockEditorHtml(block) {
+    function blockEditorHtml(block, path, standalone) {
+        const owner = pathKey(path);
         if (block.type === 'heading') {
             return `
                 <div class="heading-editor">
                     <label class="compact-field">
                         <span>Ebene</span>
-                        <select data-setting="level">
+                        <select data-setting="level" data-owner-path="${owner}">
                             ${[1, 2, 3, 4, 5, 6].map((level) => `
                                 <option value="${level}" ${Number(block.settings.level) === level ? 'selected' : ''}>H${level}</option>
                             `).join('')}
@@ -773,12 +841,13 @@
                     <input
                         class="heading-input heading-level-${Number(block.settings.level) || 1}"
                         data-field="content"
+                        data-owner-path="${owner}"
                         value="${escapeHtml(block.content)}"
                         placeholder="Überschrift"
                         maxlength="1000000"
                     >
                     <label class="check-field">
-                        <input type="checkbox" data-setting="includeInToc" ${block.settings.includeInToc !== false ? 'checked' : ''}>
+                        <input type="checkbox" data-setting="includeInToc" data-owner-path="${owner}" ${block.settings.includeInToc !== false ? 'checked' : ''}>
                         Im Inhaltsverzeichnis
                     </label>
                 </div>
@@ -791,62 +860,216 @@
                     <textarea
                         class="raw-textarea ${block.settings.wrap === false ? 'no-wrap' : ''}"
                         data-field="content"
+                        data-owner-path="${owner}"
                         spellcheck="false"
                         placeholder="Text wird exakt und ohne Interpretation gespeichert."
                     >${escapeHtml(block.content)}</textarea>
                     <label class="check-field block-option-row">
-                        <input type="checkbox" data-setting="wrap" ${block.settings.wrap !== false ? 'checked' : ''}>
+                        <input type="checkbox" data-setting="wrap" data-owner-path="${owner}" ${block.settings.wrap !== false ? 'checked' : ''}>
                         Lange Zeilen umbrechen
                     </label>
                 </div>
             `;
         }
 
-        const mode = block.settings.editorMode || 'split';
-        return `
-            <div class="markdown-editor markdown-mode-${escapeHtml(mode)}" data-markdown-editor>
+        if (block.type === 'markdown') {
+            const mode = block.settings.editorMode || 'split';
+            return `
+            <div class="markdown-editor markdown-mode-${escapeHtml(mode)}" data-markdown-editor data-owner-path="${owner}">
                 <div class="markdown-tabs" role="tablist" aria-label="Markdown-Ansicht">
-                    <button type="button" data-markdown-mode="raw" class="${mode === 'raw' ? 'active' : ''}">Bearbeiten</button>
-                    <button type="button" data-markdown-mode="split" class="${mode === 'split' ? 'active' : ''}">Geteilt</button>
-                    <button type="button" data-markdown-mode="preview" class="${mode === 'preview' ? 'active' : ''}">Vorschau</button>
+                    <button type="button" data-markdown-mode="raw" data-owner-path="${owner}" class="${mode === 'raw' ? 'active' : ''}">Bearbeiten</button>
+                    <button type="button" data-markdown-mode="split" data-owner-path="${owner}" class="${mode === 'split' ? 'active' : ''}">Geteilt</button>
+                    <button type="button" data-markdown-mode="preview" data-owner-path="${owner}" class="${mode === 'preview' ? 'active' : ''}">Vorschau</button>
                 </div>
                 <div class="markdown-toolbar" aria-label="Markdown-Werkzeuge">
-                    <button type="button" data-markdown-wrap="**|**" title="Fett"><b>B</b></button>
-                    <button type="button" data-markdown-wrap="_|_" title="Kursiv"><i>I</i></button>
-                    <button type="button" data-markdown-wrap="\`|\`" title="Inline-Code">&lt;/&gt;</button>
-                    <button type="button" data-markdown-prefix="- " title="Liste">• Liste</button>
-                    <button type="button" data-markdown-prefix="> " title="Zitat">❯ Zitat</button>
-                    <button type="button" data-markdown-link title="Link">↗ Link</button>
+                    <button type="button" data-markdown-wrap="**|**" data-owner-path="${owner}" title="Fett"><b>B</b></button>
+                    <button type="button" data-markdown-wrap="_|_" data-owner-path="${owner}" title="Kursiv"><i>I</i></button>
+                    <button type="button" data-markdown-wrap="\`|\`" data-owner-path="${owner}" title="Inline-Code">&lt;/&gt;</button>
+                    <button type="button" data-markdown-prefix="- " data-owner-path="${owner}" title="Liste">• Liste</button>
+                    <button type="button" data-markdown-prefix="1. " data-owner-path="${owner}" title="Nummerierte Liste">1. Liste</button>
+                    <button type="button" data-markdown-prefix="> " data-owner-path="${owner}" title="Zitat">❯ Zitat</button>
+                    <button type="button" data-markdown-wrap="\`\`\`\n|\n\`\`\`" data-owner-path="${owner}" title="Codeblock">▣ Code</button>
+                    <button type="button" data-markdown-link data-owner-path="${owner}" title="Link">↗ Link</button>
                 </div>
                 <div class="markdown-panes">
                     <textarea
                         class="markdown-source"
                         data-field="content"
+                        data-owner-path="${owner}"
                         spellcheck="true"
                         placeholder="Markdown schreiben …"
                     >${escapeHtml(block.content)}</textarea>
-                    <div class="markdown-preview" data-markdown-preview></div>
+                    <div class="markdown-preview" data-markdown-preview data-owner-path="${owner}"></div>
+                </div>
+            </div>
+            `;
+        }
+
+        if (block.type === 'code') {
+            return `
+                <div class="code-editor">
+                    <div class="block-settings-grid">
+                        <label>
+                            <span>Sprache</span>
+                            <input data-setting="language" data-owner-path="${owner}" value="${escapeHtml(block.settings.language || 'text')}" maxlength="64" placeholder="z. B. php, js, cpp">
+                        </label>
+                        <label>
+                            <span>Titel <small>(optional)</small></span>
+                            <input data-setting="title" data-nullable-setting data-owner-path="${owner}" value="${escapeHtml(block.settings.title || '')}" maxlength="180" placeholder="z. B. sensor.cpp">
+                        </label>
+                        <label class="check-field">
+                            <input type="checkbox" data-setting="showLineNumbers" data-owner-path="${owner}" ${block.settings.showLineNumbers !== false ? 'checked' : ''}>
+                            Zeilennummern
+                        </label>
+                        <label class="check-field">
+                            <input type="checkbox" data-setting="wrap" data-owner-path="${owner}" ${block.settings.wrap === true ? 'checked' : ''}>
+                            Lange Zeilen umbrechen
+                        </label>
+                    </div>
+                    <div class="code-input-shell ${block.settings.showLineNumbers === false ? 'without-line-numbers' : ''}">
+                        <pre class="code-line-numbers" data-code-line-numbers data-owner-path="${owner}" aria-hidden="true">${codeLineNumbers(block.content)}</pre>
+                        <textarea
+                            class="code-textarea ${block.settings.wrap === true ? '' : 'no-wrap'}"
+                            data-field="content"
+                            data-owner-path="${owner}"
+                            spellcheck="false"
+                            placeholder="Code eingeben …"
+                        >${escapeHtml(block.content)}</textarea>
+                    </div>
+                </div>
+            `;
+        }
+
+        if (block.type === 'divider') {
+            return `
+                <div class="divider-editor">
+                    <hr>
+                    <label class="compact-field">
+                        <span>Stil</span>
+                        <select data-setting="style" data-owner-path="${owner}">
+                            <option value="line" selected>Linie</option>
+                        </select>
+                    </label>
+                </div>
+            `;
+        }
+
+        if (block.type === 'callout') {
+            const style = block.settings.style || 'info';
+            return `
+                <div class="container-editor callout-editor callout-${escapeHtml(style)}">
+                    <div class="container-settings">
+                        <label>
+                            <span>Typ</span>
+                            <select data-setting="style" data-owner-path="${owner}">
+                                ${[
+                                    ['info', 'Info'],
+                                    ['warning', 'Warnung'],
+                                    ['success', 'Erfolg'],
+                                    ['error', 'Fehler'],
+                                    ['idea', 'Idee'],
+                                ].map(([value, label]) => `
+                                    <option value="${value}" ${style === value ? 'selected' : ''}>${label}</option>
+                                `).join('')}
+                            </select>
+                        </label>
+                        <label class="container-title-field">
+                            <span>Titel</span>
+                            <input data-setting="title" data-owner-path="${owner}" value="${escapeHtml(block.settings.title || 'Hinweis')}" maxlength="180">
+                        </label>
+                        <label>
+                            <span>Icon <small>(optional)</small></span>
+                            <input data-setting="icon" data-nullable-setting data-owner-path="${owner}" value="${escapeHtml(block.settings.icon || '')}" maxlength="32" placeholder="z. B. 💡">
+                        </label>
+                    </div>
+                    <div class="callout-title-preview">
+                        <span data-callout-icon data-owner-path="${owner}" aria-hidden="true">${escapeHtml(block.settings.icon || calloutIcon(style))}</span>
+                        <span data-callout-title data-owner-path="${owner}">${escapeHtml(block.settings.title || 'Hinweis')}</span>
+                    </div>
+                    <div class="container-children" data-container-path="${owner}">
+                        ${blockListHtml(block.children || [], path)}
+                        ${(block.children || []).length === 0 ? '<p class="container-empty">Mit ＋ einen Kindblock einfügen</p>' : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        const defaultDisplay = block.settings.defaultDisplay || 'collapsed';
+        return `
+            <div class="container-editor expand-editor">
+                <div class="container-settings">
+                    <label class="container-title-field">
+                        <span>Titel</span>
+                        <input data-setting="title" data-owner-path="${owner}" value="${escapeHtml(block.settings.title || 'Details')}" maxlength="180">
+                    </label>
+                    <label>
+                        <span>Standardanzeige</span>
+                        <select data-setting="defaultDisplay" data-owner-path="${owner}">
+                            <option value="collapsed" ${defaultDisplay === 'collapsed' ? 'selected' : ''}>Eingeklappt</option>
+                            <option value="expanded" ${defaultDisplay === 'expanded' ? 'selected' : ''}>Ausgeklappt</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="expand-title-preview">
+                    <span aria-hidden="true">⌄</span>
+                    <span data-expand-title data-owner-path="${owner}">${escapeHtml(block.settings.title || 'Details')}</span>
+                </div>
+                <div class="container-children" data-container-path="${owner}">
+                    ${blockListHtml(block.children || [], path)}
+                    ${(block.children || []).length === 0 ? '<p class="container-empty">Mit ＋ einen Kindblock einfügen</p>' : ''}
                 </div>
             </div>
         `;
     }
 
-    function insertButtonHtml(index) {
+    function insertButtonHtml(parentPath, index) {
         return `
-            <div class="insert-row" data-drop-index="${index}">
+            <div class="insert-row" data-parent-path="${pathKey(parentPath)}" data-drop-index="${index}">
                 <span></span>
-                <button class="insert-button" type="button" data-insert-index="${index}" aria-label="Block an Position ${index + 1} einfügen" title="Block einfügen">＋</button>
+                <button
+                    class="insert-button"
+                    type="button"
+                    data-parent-path="${pathKey(parentPath)}"
+                    data-insert-index="${index}"
+                    aria-label="Block an Position ${index + 1} einfügen"
+                    title="Block einfügen"
+                >＋</button>
                 <span></span>
             </div>
         `;
     }
 
     function blockSummary(block) {
+        if (block.type === 'divider') return 'Linie';
+        if (block.type === 'callout') {
+            return `${block.settings?.title || 'Hinweis'} · ${(block.children || []).length} Kindblöcke`;
+        }
+        if (block.type === 'expand') {
+            return `${block.settings?.title || 'Details'} · ${(block.children || []).length} Kindblöcke`;
+        }
+        if (block.type === 'code' && block.settings?.title) {
+            return `${block.settings.title} · ${block.settings.language || 'text'}`;
+        }
         const content = String(block.content || '').replace(/\s+/g, ' ').trim();
         if (content) {
             return content.length > 58 ? `${content.slice(0, 58)}…` : content;
         }
         return block.type === 'raw_text' ? 'Leer · ohne Interpretation' : 'Leer';
+    }
+
+    function calloutIcon(style) {
+        return {
+            info: 'ℹ',
+            warning: '⚠',
+            success: '✓',
+            error: '!',
+            idea: '💡',
+        }[style] || 'ℹ';
+    }
+
+    function codeLineNumbers(content) {
+        const count = Math.min(10_000, String(content ?? '').split('\n').length);
+        return Array.from({ length: count }, (_, index) => `<span>${index + 1}</span>`).join('');
     }
 
     function bindEditorEvents() {
@@ -897,12 +1120,15 @@
         });
 
         document.querySelectorAll('.insert-button').forEach((button) => {
-            button.addEventListener('click', () => insertBlock(Number(button.dataset.insertIndex)));
+            button.addEventListener('click', () => insertBlock(
+                parseBlockPath(button.dataset.parentPath),
+                Number(button.dataset.insertIndex)
+            ));
         });
 
         document.querySelectorAll('.insert-row').forEach((row) => {
             row.addEventListener('dragover', (event) => {
-                if (state.draggedIndex === null) return;
+                if (state.draggedPath === null) return;
                 event.preventDefault();
                 row.classList.add('drop-target');
             });
@@ -910,9 +1136,13 @@
             row.addEventListener('drop', (event) => {
                 event.preventDefault();
                 row.classList.remove('drop-target');
-                if (state.draggedIndex === null) return;
-                moveBlock(state.draggedIndex, Number(row.dataset.dropIndex));
-                state.draggedIndex = null;
+                if (state.draggedPath === null) return;
+                moveBlock(
+                    state.draggedPath,
+                    parseBlockPath(row.dataset.parentPath),
+                    Number(row.dataset.dropIndex)
+                );
+                state.draggedPath = null;
             });
         });
 
@@ -920,94 +1150,160 @@
     }
 
     function bindBlockEvents(card) {
-        const index = Number(card.dataset.index);
-        const block = state.pageState.page.blocks[index];
+        const path = parseBlockPath(card.dataset.blockPath);
+        const owner = pathKey(path);
+        const index = path.at(-1);
+        const parentPath = path.slice(0, -1);
+        const block = blockAtPath(path);
         if (!block) return;
+        const header = card.querySelector(':scope > .block-header');
 
-        card.querySelectorAll('[data-field="content"]').forEach((field) => {
+        card.querySelectorAll(`[data-field="content"][data-owner-path="${owner}"]`).forEach((field) => {
             field.addEventListener('input', () => {
                 block.content = field.value;
-                const summary = card.querySelector('.block-heading span');
+                const summary = header?.querySelector('.block-heading span');
                 if (summary) summary.textContent = blockSummary(block);
                 if (block.type === 'markdown') {
-                    const preview = card.querySelector('[data-markdown-preview]');
+                    const preview = card.querySelector(`[data-markdown-preview][data-owner-path="${owner}"]`);
                     if (preview) preview.innerHTML = renderMarkdown(block.content);
+                }
+                if (block.type === 'code') {
+                    const numbers = card.querySelector(
+                        `[data-code-line-numbers][data-owner-path="${owner}"]`
+                    );
+                    if (numbers) numbers.innerHTML = codeLineNumbers(block.content);
                 }
                 markDirty();
             });
         });
 
-        card.querySelectorAll('[data-setting]').forEach((control) => {
-            control.addEventListener('change', () => {
+        card.querySelectorAll(`[data-setting][data-owner-path="${owner}"]`).forEach((control) => {
+            const updateSetting = () => {
                 const key = control.dataset.setting;
                 block.settings[key] = control.type === 'checkbox'
                     ? control.checked
-                    : (key === 'level' ? Number(control.value) : control.value);
+                    : (
+                        key === 'level'
+                            ? Number(control.value)
+                            : (control.hasAttribute('data-nullable-setting') && control.value.trim() === ''
+                                ? null
+                                : control.value)
+                    );
 
                 if (key === 'wrap') {
                     card.querySelector('.raw-textarea')?.classList.toggle('no-wrap', !control.checked);
+                    card.querySelector('.code-textarea')?.classList.toggle('no-wrap', !control.checked);
+                }
+                if (key === 'showLineNumbers') {
+                    card.querySelector('.code-input-shell')
+                        ?.classList.toggle('without-line-numbers', !control.checked);
                 }
                 if (key === 'level') {
                     const input = card.querySelector('.heading-input');
                     input.className = `heading-input heading-level-${control.value}`;
                 }
+                if (['title', 'language'].includes(key)) {
+                    const summary = header?.querySelector('.block-heading span');
+                    if (summary) summary.textContent = blockSummary(block);
+                    const titlePreview = card.querySelector(
+                        `[data-expand-title][data-owner-path="${owner}"]`
+                    );
+                    if (titlePreview && key === 'title') {
+                        titlePreview.textContent = control.value || 'Details';
+                    }
+                }
+                if (block.type === 'callout' && ['title', 'icon'].includes(key)) {
+                    const preview = card.querySelector(
+                        `[data-callout-${key}][data-owner-path="${owner}"]`
+                    );
+                    if (preview) {
+                        preview.textContent = control.value
+                            || (key === 'icon' ? calloutIcon(block.settings.style) : 'Hinweis');
+                    }
+                }
                 markDirty();
-            });
+            };
+
+            control.addEventListener(
+                control.matches('input:not([type="checkbox"])') ? 'input' : 'change',
+                updateSetting
+            );
+            if (control.dataset.setting === 'style') {
+                control.addEventListener('change', () => renderEditor());
+            }
         });
 
-        card.querySelector('[data-action="up"]')?.addEventListener('click', () => {
-            if (index > 0) moveBlock(index, index - 1);
+        header?.querySelector('[data-action="up"]')?.addEventListener('click', () => {
+            if (index > 0) moveBlock(path, parentPath, index - 1);
         });
-        card.querySelector('[data-action="down"]')?.addEventListener('click', () => {
-            if (index < state.pageState.page.blocks.length - 1) moveBlock(index, index + 2);
+        header?.querySelector('[data-action="down"]')?.addEventListener('click', () => {
+            const siblings = blocksAtParentPath(parentPath) || [];
+            if (index < siblings.length - 1) moveBlock(path, parentPath, index + 2);
         });
-        card.querySelector('[data-action="collapse"]')?.addEventListener('click', () => toggleBlock(block.id));
-        card.querySelector('[data-action="menu"]')?.addEventListener('click', (event) => {
+        header?.querySelector('[data-action="collapse"]')?.addEventListener('click', () => toggleBlock(block.id));
+        header?.querySelector('[data-action="menu"]')?.addEventListener('click', (event) => {
             event.stopPropagation();
-            const menu = card.querySelector('.block-menu');
+            const menu = header.querySelector('.block-menu');
             document.querySelectorAll('.popover').forEach((other) => {
                 if (other !== menu) other.hidden = true;
             });
             menu.hidden = !menu.hidden;
         });
 
-        card.querySelectorAll('[data-menu-action]').forEach((button) => {
-            button.addEventListener('click', () => handleBlockMenu(button.dataset.menuAction, index, card));
+        header?.querySelectorAll('[data-menu-action]').forEach((button) => {
+            button.addEventListener('click', () => handleBlockMenu(button.dataset.menuAction, path, card));
         });
 
-        const moveHandle = card.querySelector('.block-move');
+        const moveHandle = header?.querySelector('.block-move');
         moveHandle?.addEventListener('dragstart', (event) => {
-            state.draggedIndex = index;
+            state.draggedPath = path;
             card.classList.add('dragging');
             event.dataTransfer.effectAllowed = 'move';
             event.dataTransfer.setData('text/plain', block.id);
         });
         moveHandle?.addEventListener('dragend', () => {
-            state.draggedIndex = null;
+            state.draggedPath = null;
             card.classList.remove('dragging');
             document.querySelectorAll('.drop-target').forEach((row) => row.classList.remove('drop-target'));
         });
 
-        card.querySelectorAll('[data-markdown-mode]').forEach((button) => {
+        card.querySelectorAll(`[data-markdown-mode][data-owner-path="${owner}"]`).forEach((button) => {
             button.addEventListener('click', () => {
                 block.settings.editorMode = button.dataset.markdownMode;
                 markDirty();
                 renderEditor();
             });
         });
-        card.querySelectorAll('[data-markdown-wrap]').forEach((button) => {
+        card.querySelectorAll(`[data-markdown-wrap][data-owner-path="${owner}"]`).forEach((button) => {
             button.addEventListener('click', () => {
                 const [before, after] = button.dataset.markdownWrap.split('|');
-                wrapTextareaSelection(card.querySelector('.markdown-source'), before, after);
+                wrapTextareaSelection(
+                    card.querySelector(`.markdown-source[data-owner-path="${owner}"]`),
+                    before,
+                    after
+                );
             });
         });
-        card.querySelectorAll('[data-markdown-prefix]').forEach((button) => {
+        card.querySelectorAll(`[data-markdown-prefix][data-owner-path="${owner}"]`).forEach((button) => {
             button.addEventListener('click', () => {
-                prefixTextareaLines(card.querySelector('.markdown-source'), button.dataset.markdownPrefix);
+                prefixTextareaLines(
+                    card.querySelector(`.markdown-source[data-owner-path="${owner}"]`),
+                    button.dataset.markdownPrefix
+                );
             });
         });
-        card.querySelector('[data-markdown-link]')?.addEventListener('click', () => {
-            wrapTextareaSelection(card.querySelector('.markdown-source'), '[', '](https://)');
+        card.querySelector(`[data-markdown-link][data-owner-path="${owner}"]`)?.addEventListener('click', () => {
+            wrapTextareaSelection(
+                card.querySelector(`.markdown-source[data-owner-path="${owner}"]`),
+                '[',
+                '](https://)'
+            );
+        });
+
+        const codeTextarea = card.querySelector(`.code-textarea[data-owner-path="${owner}"]`);
+        const codeNumbers = card.querySelector(`[data-code-line-numbers][data-owner-path="${owner}"]`);
+        codeTextarea?.addEventListener('scroll', () => {
+            if (codeNumbers) codeNumbers.scrollTop = codeTextarea.scrollTop;
         });
     }
 
@@ -1212,13 +1508,24 @@
         }
     }
 
-    function moveBlock(fromIndex, insertionIndex) {
-        const blocks = state.pageState.page.blocks;
-        if (fromIndex < 0 || fromIndex >= blocks.length) return;
-        let target = Math.max(0, Math.min(insertionIndex, blocks.length));
-        const [block] = blocks.splice(fromIndex, 1);
-        if (fromIndex < target) target -= 1;
-        blocks.splice(target, 0, block);
+    function moveBlock(sourcePath, targetParentPath, insertionIndex) {
+        if (!sourcePath.length || pathStartsWith(targetParentPath, sourcePath)) {
+            if (pathStartsWith(targetParentPath, sourcePath)) {
+                toast('Ein Block kann nicht in sich selbst verschoben werden.', { tone: 'error' });
+            }
+            return;
+        }
+
+        const sourceParentPath = sourcePath.slice(0, -1);
+        const sourceIndex = sourcePath.at(-1);
+        const sourceBlocks = blocksAtParentPath(sourceParentPath);
+        const targetBlocks = blocksAtParentPath(targetParentPath);
+        if (!sourceBlocks || !targetBlocks || !sourceBlocks[sourceIndex]) return;
+
+        let target = Math.max(0, Math.min(insertionIndex, targetBlocks.length));
+        const [block] = sourceBlocks.splice(sourceIndex, 1);
+        if (sourceBlocks === targetBlocks && sourceIndex < target) target -= 1;
+        targetBlocks.splice(target, 0, block);
         markDirty();
         renderEditor();
     }
@@ -1233,7 +1540,10 @@
         renderEditor();
     }
 
-    async function insertBlock(index) {
+    async function insertBlock(parentPath, index) {
+        const targetBlocks = blocksAtParentPath(parentPath);
+        if (!targetBlocks) return;
+
         const choice = await choiceModal({
             title: 'Block einfügen',
             description: 'Wähle den Inhaltstyp für die neue Position.',
@@ -1241,6 +1551,10 @@
                 { value: 'heading', label: 'Überschrift', detail: 'Strukturierte H1–H6-Überschrift', icon: 'H' },
                 { value: 'raw_text', label: 'Raw Text', detail: 'Exakter Text ohne Interpretation', icon: 'T' },
                 { value: 'markdown', label: 'Markdown', detail: 'Markdown-Quelle mit Vorschau', icon: 'M' },
+                { value: 'code', label: 'Code', detail: 'Quelltext mit Sprache und Anzeigeoptionen', icon: '</>' },
+                { value: 'divider', label: 'Trennlinie', detail: 'Visuelle Gliederung ohne Inhalt', icon: '—' },
+                { value: 'callout', label: 'Hinweisbox', detail: 'Container für Hinweise und Warnungen', icon: '!' },
+                { value: 'expand', label: 'Aufklappbarer Bereich', detail: 'Container für ausblendbare Details', icon: '⌄' },
                 ...(state.cutBlock
                     ? [{ value: 'paste', label: 'Ausgeschnittenen Block einfügen', detail: blockSummary(state.cutBlock), icon: '↳' }]
                     : []),
@@ -1249,7 +1563,7 @@
         if (!choice) return;
 
         if (choice === 'paste') {
-            state.pageState.page.blocks.splice(index, 0, state.cutBlock);
+            targetBlocks.splice(index, 0, state.cutBlock);
             state.cutBlock = null;
             markDirty();
             renderEditor();
@@ -1262,7 +1576,7 @@
                 { method: 'POST', body: {} }
             );
             const block = newBlock(choice, result.blockId);
-            state.pageState.page.blocks.splice(index, 0, block);
+            targetBlocks.splice(index, 0, block);
             markDirty();
             renderEditor();
             requestAnimationFrame(() => {
@@ -1292,18 +1606,89 @@
                 meta: {},
             };
         }
+        if (type === 'markdown') {
+            return {
+                id,
+                type,
+                content: '',
+                settings: { editorMode: 'split' },
+                meta: {},
+            };
+        }
+        if (type === 'code') {
+            return {
+                id,
+                type,
+                content: '',
+                settings: {
+                    language: 'text',
+                    showLineNumbers: true,
+                    wrap: false,
+                    title: null,
+                },
+                meta: {},
+            };
+        }
+        if (type === 'divider') {
+            return {
+                id,
+                type,
+                content: null,
+                settings: { style: 'line' },
+                meta: {},
+            };
+        }
+        if (type === 'callout') {
+            return {
+                id,
+                type,
+                content: null,
+                settings: {
+                    style: 'info',
+                    title: 'Hinweis',
+                    icon: null,
+                },
+                children: [],
+                meta: {},
+            };
+        }
         return {
             id,
-            type: 'markdown',
-            content: '',
-            settings: { editorMode: 'split' },
+            type: 'expand',
+            content: null,
+            settings: {
+                title: 'Details',
+                defaultDisplay: 'collapsed',
+            },
+            children: [],
             meta: {},
         };
     }
 
-    async function handleBlockMenu(action, index, card) {
-        const block = state.pageState.page.blocks[index];
-        card.querySelector('.block-menu').hidden = true;
+    async function duplicateBlockTree(block) {
+        const result = await api(
+            `/api/v1/workspaces/${state.workspace.id}/pages/${state.pageState.page.id}/block-ids`,
+            { method: 'POST', body: {} }
+        );
+        const duplicate = clone(block);
+        duplicate.id = result.blockId;
+        duplicate.meta = {};
+        if (Array.isArray(block.children)) {
+            duplicate.children = [];
+            for (const child of block.children) {
+                duplicate.children.push(await duplicateBlockTree(child));
+            }
+        }
+        return duplicate;
+    }
+
+    async function handleBlockMenu(action, path, card) {
+        const parentPath = path.slice(0, -1);
+        const index = path.at(-1);
+        const siblings = blocksAtParentPath(parentPath);
+        const block = siblings?.[index];
+        if (!block) return;
+        card.querySelector(':scope > .block-header .block-menu').hidden = true;
 
         if (action === 'settings') {
             if (state.collapsedBlocks.has(block.id)) {
@@ -1311,10 +1696,15 @@
                 persistCollapsedBlocks();
                 renderEditor();
                 requestAnimationFrame(() => {
-                    document.querySelector(`[data-block-id="${block.id}"] [data-setting]`)?.focus();
+                    document.querySelector(
+                        `[data-block-id="${block.id}"] [data-setting][data-owner-path="${pathKey(path)}"]`
+                    )?.focus();
                 });
             } else {
-                card.querySelector('[data-setting], [data-field="content"]')?.focus();
+                card.querySelector(
+                    `[data-setting][data-owner-path="${pathKey(path)}"], `
+                    + `[data-field="content"][data-owner-path="${pathKey(path)}"]`
+                )?.focus();
             }
             return;
         }
@@ -1330,14 +1720,8 @@
 
         if (action === 'duplicate') {
             try {
-                const result = await api(
-                    `/api/v1/workspaces/${state.workspace.id}/pages/${state.pageState.page.id}/block-ids`,
-                    { method: 'POST', body: {} }
-                );
-                const duplicate = clone(block);
-                duplicate.id = result.blockId;
-                duplicate.meta = {};
-                state.pageState.page.blocks.splice(index + 1, 0, duplicate);
+                const duplicate = await duplicateBlockTree(block);
+                siblings.splice(index + 1, 0, duplicate);
                 markDirty();
                 renderEditor();
             } catch (error) {
@@ -1348,13 +1732,15 @@
 
         if (action === 'cut') {
             state.cutBlock = clone(block);
-            state.pageState.page.blocks.splice(index, 1);
+            siblings.splice(index, 1);
             markDirty();
             renderEditor();
             toast('Block ausgeschnitten. Nutze ein Plus zum Einfügen.', {
                 actionLabel: 'Rückgängig',
                 onAction: () => {
-                    state.pageState.page.blocks.splice(index, 0, state.cutBlock);
+                    const undoSiblings = blocksAtParentPath(parentPath);
+                    if (!undoSiblings || !state.cutBlock) return;
+                    undoSiblings.splice(Math.min(index, undoSiblings.length), 0, state.cutBlock);
                     state.cutBlock = null;
                     markDirty();
                     renderEditor();
@@ -1390,13 +1776,15 @@
             );
             if (!confirmed) return;
 
-            const deleted = state.pageState.page.blocks.splice(index, 1)[0];
+            const deleted = siblings.splice(index, 1)[0];
             markDirty();
             renderEditor();
             toast('Block gelöscht.', {
                 actionLabel: 'Rückgängig',
                 onAction: () => {
-                    state.pageState.page.blocks.splice(index, 0, deleted);
+                    const undoSiblings = blocksAtParentPath(parentPath);
+                    if (!undoSiblings) return;
+                    undoSiblings.splice(Math.min(index, undoSiblings.length), 0, deleted);
                     markDirty();
                     renderEditor();
                 },
@@ -1707,10 +2095,11 @@
 
     function updateMarkdownPreviews() {
         document.querySelectorAll('.block-card').forEach((card) => {
-            const index = Number(card.dataset.index);
-            const block = state.pageState.page.blocks[index];
+            const path = parseBlockPath(card.dataset.blockPath);
+            const block = blockAtPath(path);
             if (block?.type !== 'markdown') return;
-            const preview = card.querySelector('[data-markdown-preview]');
+            const owner = pathKey(path);
+            const preview = card.querySelector(`[data-markdown-preview][data-owner-path="${owner}"]`);
             if (preview) preview.innerHTML = renderMarkdown(block.content);
         });
     }

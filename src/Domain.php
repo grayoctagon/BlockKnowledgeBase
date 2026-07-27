@@ -11,7 +11,17 @@ use BKB\Text;
 
 final class PageValidator
 {
-    private const ALLOWED_TYPES = ['heading', 'raw_text', 'markdown'];
+    private const ALLOWED_TYPES = [
+        'heading',
+        'raw_text',
+        'markdown',
+        'code',
+        'divider',
+        'callout',
+        'expand',
+    ];
+    private const CONTAINER_TYPES = ['callout', 'expand'];
+    private const MAX_BLOCK_DEPTH = 8;
 
     public function __construct(private readonly int $maxBlockContentBytes)
     {
@@ -41,11 +51,7 @@ final class PageValidator
         }
 
         $existingBlocks = [];
-        foreach (($publishedPage['blocks'] ?? []) as $existingBlock) {
-            if (is_array($existingBlock) && isset($existingBlock['id']) && is_string($existingBlock['id'])) {
-                $existingBlocks[$existingBlock['id']] = $existingBlock;
-            }
-        }
+        $this->indexBlocks($publishedPage['blocks'] ?? [], $existingBlocks);
 
         $normalizedBlocks = [];
         $seenIds = [];
@@ -59,18 +65,14 @@ final class PageValidator
                 );
             }
 
-            $normalized = $this->normalizeBlock($block, $existingBlocks, $userId, $position);
-            if (isset($seenIds[$normalized['id']])) {
-                throw new HttpException(
-                    422,
-                    'DUPLICATE_BLOCK_ID',
-                    'Eine Block-ID kommt innerhalb der Seite mehrfach vor.',
-                    ['blockId' => $normalized['id']]
-                );
-            }
-
-            $seenIds[$normalized['id']] = true;
-            $normalizedBlocks[] = $normalized;
+            $normalizedBlocks[] = $this->normalizeBlock(
+                $block,
+                $existingBlocks,
+                $seenIds,
+                $userId,
+                (string) $position,
+                0
+            );
         }
 
         return [
@@ -92,14 +94,26 @@ final class PageValidator
     /**
      * @param array<string, mixed> $block
      * @param array<string, array<string, mixed>> $existingBlocks
+     * @param array<string, bool> $seenIds
      * @return array<string, mixed>
      */
     private function normalizeBlock(
         array $block,
         array $existingBlocks,
+        array &$seenIds,
         string $userId,
-        int $position
+        string $position,
+        int $depth
     ): array {
+        if ($depth >= self::MAX_BLOCK_DEPTH) {
+            throw new HttpException(
+                422,
+                'BLOCK_NESTING_TOO_DEEP',
+                'Blöcke dürfen höchstens acht Ebenen tief verschachtelt werden.',
+                ['position' => $position]
+            );
+        }
+
         $id = $block['id'] ?? null;
         if (!is_string($id) || !preg_match('/^[a-f0-9]{64}$/', $id)) {
             throw new HttpException(
@@ -109,6 +123,15 @@ final class PageValidator
                 ['position' => $position]
             );
         }
+        if (isset($seenIds[$id])) {
+            throw new HttpException(
+                422,
+                'DUPLICATE_BLOCK_ID',
+                'Eine Block-ID kommt innerhalb der Seite mehrfach vor.',
+                ['blockId' => $id, 'position' => $position]
+            );
+        }
+        $seenIds[$id] = true;
 
         $type = $block['type'] ?? null;
         if (!is_string($type) || !in_array($type, self::ALLOWED_TYPES, true)) {
@@ -120,23 +143,7 @@ final class PageValidator
             );
         }
 
-        $content = $block['content'] ?? '';
-        if (!is_string($content)) {
-            throw new HttpException(
-                422,
-                'INVALID_BLOCK_CONTENT',
-                'Der Blockinhalt muss Text sein.',
-                ['blockId' => $id]
-            );
-        }
-        if (strlen($content) > $this->maxBlockContentBytes) {
-            throw new HttpException(
-                413,
-                'BLOCK_CONTENT_TOO_LARGE',
-                'Der Blockinhalt überschreitet die erlaubte Größe.',
-                ['blockId' => $id]
-            );
-        }
+        $content = $this->normalizeContent($block['content'] ?? null, $type, $id);
 
         $settings = $block['settings'] ?? [];
         if (!is_array($settings) || array_is_list($settings)) {
@@ -159,7 +166,86 @@ final class PageValidator
                     'editorMode'
                 ),
             ],
+            'code' => [
+                'language' => Text::requiredString(
+                    $settings['language'] ?? 'text',
+                    'language',
+                    64
+                ),
+                'showLineNumbers' => (bool) ($settings['showLineNumbers'] ?? true),
+                'wrap' => (bool) ($settings['wrap'] ?? false),
+                'title' => Text::optionalString($settings['title'] ?? null, 'title', 180),
+            ],
+            'divider' => [
+                'style' => $this->enum($settings['style'] ?? 'line', ['line'], 'style'),
+            ],
+            'callout' => [
+                'style' => $this->enum(
+                    $settings['style'] ?? 'info',
+                    ['info', 'warning', 'success', 'error', 'idea'],
+                    'style'
+                ),
+                'title' => Text::requiredString(
+                    $settings['title'] ?? 'Hinweis',
+                    'title',
+                    180
+                ),
+                'icon' => Text::optionalString($settings['icon'] ?? null, 'icon', 32),
+            ],
+            'expand' => [
+                'title' => Text::requiredString(
+                    $settings['title'] ?? 'Details',
+                    'title',
+                    180
+                ),
+                'defaultDisplay' => $this->enum(
+                    $settings['defaultDisplay'] ?? 'collapsed',
+                    ['collapsed', 'expanded'],
+                    'defaultDisplay'
+                ),
+            ],
         };
+
+        $normalizedChildren = null;
+        if (in_array($type, self::CONTAINER_TYPES, true)) {
+            $children = $block['children'] ?? [];
+            if (!is_array($children) || !array_is_list($children)) {
+                throw new HttpException(
+                    422,
+                    'INVALID_BLOCK_CHILDREN',
+                    'Kindblöcke müssen als JSON-Liste übertragen werden.',
+                    ['blockId' => $id]
+                );
+            }
+
+            $normalizedChildren = [];
+            foreach ($children as $childPosition => $child) {
+                if (!is_array($child) || array_is_list($child)) {
+                    throw new HttpException(
+                        422,
+                        'INVALID_BLOCK',
+                        'Jeder Kindblock muss ein JSON-Objekt sein.',
+                        ['position' => $position . '.' . $childPosition]
+                    );
+                }
+
+                $normalizedChildren[] = $this->normalizeBlock(
+                    $child,
+                    $existingBlocks,
+                    $seenIds,
+                    $userId,
+                    $position . '.' . $childPosition,
+                    $depth + 1
+                );
+            }
+        } elseif (isset($block['children']) && $block['children'] !== []) {
+            throw new HttpException(
+                422,
+                'BLOCK_CANNOT_HAVE_CHILDREN',
+                'Dieser Blocktyp darf keine Kindblöcke enthalten.',
+                ['blockId' => $id, 'type' => $type]
+            );
+        }
 
         $now = Text::now();
         $existing = $existingBlocks[$id] ?? null;
@@ -173,9 +259,13 @@ final class PageValidator
         $unchanged = is_array($existing)
             && ($existing['type'] ?? null) === $type
             && ($existing['content'] ?? null) === $content
-            && ($existing['settings'] ?? null) === $normalizedSettings;
+            && ($existing['settings'] ?? null) === $normalizedSettings
+            && (
+                $normalizedChildren === null
+                || ($existing['children'] ?? []) === $normalizedChildren
+            );
 
-        return [
+        $normalized = [
             'id' => $id,
             'type' => $type,
             'content' => $content,
@@ -191,6 +281,70 @@ final class PageValidator
                     : $userId,
             ],
         ];
+
+        if ($normalizedChildren !== null) {
+            $normalized['children'] = $normalizedChildren;
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * @param mixed $blocks
+     * @param array<string, array<string, mixed>> $index
+     */
+    private function indexBlocks(mixed $blocks, array &$index): void
+    {
+        if (!is_array($blocks)) {
+            return;
+        }
+
+        foreach ($blocks as $block) {
+            if (!is_array($block)) {
+                continue;
+            }
+
+            $id = $block['id'] ?? null;
+            if (is_string($id)) {
+                $index[$id] = $block;
+            }
+            $this->indexBlocks($block['children'] ?? null, $index);
+        }
+    }
+
+    private function normalizeContent(mixed $content, string $type, string $blockId): ?string
+    {
+        if (in_array($type, ['divider', 'callout', 'expand'], true)) {
+            if ($content !== null) {
+                throw new HttpException(
+                    422,
+                    'INVALID_BLOCK_CONTENT',
+                    'Dieser Blocktyp erwartet als Inhalt null.',
+                    ['blockId' => $blockId, 'type' => $type]
+                );
+            }
+
+            return null;
+        }
+
+        if (!is_string($content)) {
+            throw new HttpException(
+                422,
+                'INVALID_BLOCK_CONTENT',
+                'Der Blockinhalt muss Text sein.',
+                ['blockId' => $blockId]
+            );
+        }
+        if (strlen($content) > $this->maxBlockContentBytes) {
+            throw new HttpException(
+                413,
+                'BLOCK_CONTENT_TOO_LARGE',
+                'Der Blockinhalt überschreitet die erlaubte Größe.',
+                ['blockId' => $blockId]
+            );
+        }
+
+        return $content;
     }
 
     /**
