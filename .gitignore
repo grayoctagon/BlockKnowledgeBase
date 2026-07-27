@@ -1,0 +1,6 @@
+/data/*
+!/data/.gitignore
+/.idea/
+/.vscode/
+*.log
+.DS_Store
