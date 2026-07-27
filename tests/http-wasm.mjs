@@ -162,6 +162,17 @@ assert(response.status === 200, 'Der Entwurf muss über die API gespeichert werd
 assert(response.payload.data.draftRevision === 1, 'Die erste Entwurfsrevision muss 1 sein.');
 
 response = await request(
+    'GET',
+    `/api/v1/workspaces/${workspaceId}/pages/${pageId}`
+);
+assert(response.status === 200, 'Die Seite muss nach einem Autosave neu geladen werden können.');
+assert(response.payload.data.hasDraft === true, 'Ein Reload muss den gespeicherten Entwurf erkennen.');
+assert(
+    response.payload.data.page.blocks[0].content === '**API-Smoke-Test**',
+    'Ein Reload muss den Inhalt des gespeicherten Entwurfs zurückgeben.'
+);
+
+response = await request(
     'POST',
     `/api/v1/workspaces/${workspaceId}/pages/${pageId}/versions`,
     {

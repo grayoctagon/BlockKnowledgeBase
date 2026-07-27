@@ -1320,6 +1320,21 @@
         setSaveStatus('Nicht gespeichert', 'dirty');
     }
 
+    function applyDraftSaveMetadata(result) {
+        state.workspace = result.workspace;
+        state.pageState.workspace = result.workspace;
+        state.pageState.hasDraft = result.hasDraft;
+        state.pageState.publishedRevision = result.publishedRevision;
+        state.pageState.draftRevision = result.draftRevision;
+        state.pageState.draftSavedAt = result.draftSavedAt;
+
+        // Keep the current page and block objects alive. The rendered controls
+        // have event handlers that deliberately reference these objects. Only
+        // server-owned revision metadata is merged after an autosave.
+        state.pageState.page.revision = result.publishedRevision;
+        state.pageState.page.draftRevision = result.draftRevision;
+    }
+
     async function saveDraft(force = false) {
         if (state.savingPromise) {
             if (state.dirty || force) state.saveAgain = true;
@@ -1353,22 +1368,18 @@
 
         try {
             const result = await state.savingPromise;
+            applyDraftSaveMetadata(result);
+
             if (state.changeCounter === saveGeneration) {
-                state.pageState = result;
-                state.workspace = result.workspace;
                 state.dirty = false;
                 state.dirtySince = null;
+                setSaveStatus(`Automatisch gespeichert ${timeOnly(result.draftSavedAt)}`, 'saved');
             } else {
-                state.pageState.draftRevision = result.draftRevision;
-                state.pageState.hasDraft = true;
-                state.pageState.draftSavedAt = result.draftSavedAt;
-                state.pageState.page.revision = result.publishedRevision;
-                state.pageState.page.draftRevision = result.draftRevision;
                 state.dirty = true;
                 scheduleAutosaveAfterConcurrentChange();
+                setSaveStatus('Neuere Änderungen nicht gespeichert', 'dirty');
             }
-            setSaveStatus(`Automatisch gespeichert ${timeOnly(result.draftSavedAt)}`, 'saved');
-            return result;
+            return state.pageState;
         } catch (error) {
             state.dirty = true;
             setSaveStatus('Speichern fehlgeschlagen', 'error');

@@ -218,6 +218,24 @@ async function waitFor(selector, timeout = 2000) {
     throw new Error(`Element nicht gefunden: ${selector}`);
 }
 
+async function waitForDraftRevision(minimumRevision, timeout = 3500) {
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+        if (draftRevision >= minimumRevision) return;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+    }
+    throw new Error(`Entwurfsrevision ${minimumRevision} wurde nicht rechtzeitig gespeichert.`);
+}
+
+function findBlockInTree(blocks, blockId) {
+    for (const block of blocks) {
+        if (block.id === blockId) return block;
+        const nested = findBlockInTree(block.children || [], blockId);
+        if (nested) return nested;
+    }
+    return null;
+}
+
 let assertions = 0;
 function assert(condition, message) {
     assertions += 1;
@@ -291,6 +309,81 @@ assert(
         === (14).toString(16).padStart(64, '0'),
     'Kindblöcke müssen innerhalb ihres Containers mit den Pfeilen sortierbar sein.'
 );
+
+const regressionFailures = [];
+function regressionAssert(condition, message) {
+    assertions += 1;
+    if (!condition) regressionFailures.push(message);
+}
+
+const markdownId = 'c'.repeat(64);
+let markdownCard = window.document.querySelector(`[data-block-id="${markdownId}"]`);
+if (markdownCard.classList.contains('block-collapsed')) {
+    markdownCard.querySelector('[data-action="collapse"]').click();
+    markdownCard = window.document.querySelector(`[data-block-id="${markdownId}"]`);
+}
+markdownCard.querySelector('[data-markdown-mode="raw"]').click();
+
+let expectedDraftRevision = draftRevision + 1;
+await waitForDraftRevision(expectedDraftRevision);
+
+markdownCard = window.document.querySelector(`[data-block-id="${markdownId}"]`);
+let markdownSource = markdownCard.querySelector('.markdown-source');
+const markdownFastText = '\nSchneller Moduswechsel bleibt erhalten.';
+markdownSource.value += markdownFastText;
+markdownSource.dispatchEvent(new window.Event('input', { bubbles: true }));
+markdownCard.querySelector('[data-markdown-mode="split"]').click();
+
+markdownCard = window.document.querySelector(`[data-block-id="${markdownId}"]`);
+regressionAssert(
+    markdownCard.querySelector('.markdown-source').value.includes(markdownFastText),
+    'Markdown-Eingabe darf bei einem sofortigen Wechsel von Bearbeiten zu Geteilt nicht verloren gehen.'
+);
+regressionAssert(
+    markdownCard.querySelector('[data-markdown-editor]').classList.contains('markdown-mode-split'),
+    'Der sofort gewählte Markdown-Modus muss tatsächlich aktiviert werden.'
+);
+
+expectedDraftRevision = draftRevision + 1;
+await waitForDraftRevision(expectedDraftRevision);
+
+const rawId = 'b'.repeat(64);
+let currentRaw = window.document.querySelector(`[data-block-id="${rawId}"] textarea`);
+const rawFastText = '\nSchnelles Einklappen bleibt erhalten.';
+currentRaw.value += rawFastText;
+currentRaw.dispatchEvent(new window.Event('input', { bubbles: true }));
+window.document
+    .querySelector(`[data-block-id="${'e'.repeat(64)}"] [data-action="collapse"]`)
+    .click();
+
+currentRaw = window.document.querySelector(`[data-block-id="${rawId}"] textarea`);
+regressionAssert(
+    currentRaw.value.includes(rawFastText),
+    'Raw-Text-Eingabe darf beim sofortigen Einklappen eines anderen Blocks nicht verloren gehen.'
+);
+
+expectedDraftRevision = draftRevision + 1;
+await waitForDraftRevision(expectedDraftRevision);
+
+currentRaw = window.document.querySelector(`[data-block-id="${rawId}"] textarea`);
+const reloadText = '\nDieser Entwurf muss einen Reload überleben.';
+currentRaw.value += reloadText;
+currentRaw.dispatchEvent(new window.Event('input', { bubbles: true }));
+expectedDraftRevision = draftRevision + 1;
+await waitForDraftRevision(expectedDraftRevision);
+
+regressionAssert(
+    window.document.querySelector('#save-status').textContent.startsWith('Automatisch gespeichert'),
+    'Die Oberfläche muss den abgeschlossenen Autosave anzeigen.'
+);
+regressionAssert(
+    findBlockInTree(page.blocks, rawId)?.content.includes(reloadText),
+    'Der als gespeichert gemeldete Browserstand muss im serverseitigen Entwurf liegen und einen Reload überleben.'
+);
+
+if (regressionFailures.length > 0) {
+    throw new Error(`Lost-Update-Regressionen:\n- ${regressionFailures.join('\n- ')}`);
+}
 assert(errors.length === 0, 'Die Oberfläche darf keine unbehandelten Laufzeitfehler auslösen.');
 
 window.close();
